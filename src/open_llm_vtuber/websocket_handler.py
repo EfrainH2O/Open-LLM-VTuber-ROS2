@@ -72,6 +72,7 @@ class WebSocketHandler:
 
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
+        self.robot_bridge = None  # [robot fork hook] set by routes.init_client_ws_route
 
     def _init_message_handlers(self) -> Dict[str, Callable]:
         """Initialize message type to handler mapping"""
@@ -172,8 +173,9 @@ class WebSocketHandler:
         # Send initial group status
         await self.send_group_update(websocket, client_uid)
 
-        # Start microphone
-        await websocket.send_text(json.dumps({"type": "control", "text": "start-mic"}))
+        # Start microphone ([robot fork hook] only if this server can transcribe it)
+        if session_service_context.asr_engine is not None:
+            await websocket.send_text(json.dumps({"type": "control", "text": "start-mic"}))
 
     async def _init_service_context(
         self, send_text: Callable, client_uid: str
@@ -199,6 +201,10 @@ class WebSocketHandler:
             send_text=send_text,
             client_uid=client_uid,
         )
+        # [robot fork hook] a robot tablet gets its robot's own agent and history folder instead
+        # of the shared default agent, so robots never see each other's conversations
+        if self.robot_bridge:
+            await self.robot_bridge.isolate_context(session_service_context, client_uid)
         return session_service_context
 
     async def handle_websocket_communication(
@@ -250,6 +256,10 @@ class WebSocketHandler:
         msg_type = data.get("type")
         if not msg_type:
             logger.warning("Message received without type")
+            return
+
+        # [robot fork hook] group / character switch / new history: keep each robot's context apart
+        if self.robot_bridge and await self.robot_bridge.intercept(websocket, client_uid, data):
             return
 
         handler = self._message_handlers.get(msg_type)
@@ -514,6 +524,11 @@ class WebSocketHandler:
         self, websocket: WebSocket, client_uid: str, data: WSMessage
     ) -> None:
         """Handle triggers that start a conversation"""
+        # [robot fork hook] while the robot is teleoperated, the AI may not answer through it
+        if self.robot_bridge and await self.robot_bridge.reject_if_blocked(
+            websocket, client_uid, data.get("type", "")
+        ):
+            return
         await handle_conversation_trigger(
             msg_type=data.get("type", ""),
             data=data,
@@ -562,6 +577,8 @@ class WebSocketHandler:
         """
         Handle audio playback start notification
         """
+        if self.robot_bridge:  # [robot fork hook] Kachaka says the sentence the avatar starts mouthing
+            await self.robot_bridge.on_audio_play_start(client_uid, data)
         group_members = self.chat_group_manager.get_group_members(client_uid)
         if len(group_members) > 1:
             display_text = data.get("display_text")

@@ -321,6 +321,11 @@ class ServiceContext:
             logger.critical("Try to proceed without Live2D...")
 
     def init_asr(self, asr_config: ASRConfig) -> None:
+        if asr_config.asr_model is None:   # [robot fork hook] asr_model: null, see FORK.md
+            logger.info("ASR is disabled.")
+            self.asr_engine = None
+            return
+
         if not self.asr_engine or (self.character_config.asr_config != asr_config):
             logger.info(f"Initializing ASR: {asr_config.asr_model}")
             self.asr_engine = ASRFactory.get_asr_system(

@@ -9,6 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 from loguru import logger
 from .service_context import ServiceContext
 from .websocket_handler import WebSocketHandler
+from .robot.bridge import RobotBridge  # [robot fork hook]
 from .proxy_handler import ProxyHandler
 
 
@@ -25,15 +26,27 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
 
     router = APIRouter()
     ws_handler = WebSocketHandler(default_context_cache)
+    # [robot fork hook] teleoperation bridge: operator speech in, Kachaka voice out
+    robot_bridge = RobotBridge(ws_handler)
+    ws_handler.robot_bridge = robot_bridge
+    router.add_event_handler("startup", robot_bridge.start)
 
     @router.websocket("/client-ws")
     async def websocket_endpoint(websocket: WebSocket):
         """WebSocket endpoint for client connections"""
         await websocket.accept()
         client_uid = str(uuid4())
+        # [robot fork hook] a robot tablet's WebView: its Kachaka voices its responses, and it gets
+        # its robot's own memory (announced before handle_new_connection builds its context)
+        robot_id = robot_bridge.robot_id_of(websocket)
+        if robot_id:
+            websocket = robot_bridge.wrap(websocket, robot_id)
+            robot_bridge.expect(client_uid, robot_id)
 
         try:
             await ws_handler.handle_new_connection(websocket, client_uid)
+            if robot_id:
+                robot_bridge.attach(client_uid, robot_id)
             await ws_handler.handle_websocket_communication(websocket, client_uid)
         except WebSocketDisconnect:
             await ws_handler.handle_disconnect(client_uid)
@@ -41,6 +54,8 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
             logger.error(f"Error in WebSocket connection: {e}")
             await ws_handler.handle_disconnect(client_uid)
             raise
+        finally:
+            robot_bridge.detach(client_uid)
 
     return router
 
@@ -144,6 +159,12 @@ def init_webtool_routes(default_context_cache: ServiceContext) -> APIRouter:
         Endpoint for transcribing audio using the ASR engine
         """
         logger.info(f"Received audio file for transcription: {file.filename}")
+        if default_context_cache.asr_engine is None:   # [robot fork hook] asr_model: null, see FORK.md
+            return Response(
+                content=json.dumps({"error": "Speech recognition is off (asr_model: null)"}),
+                status_code=503,
+                media_type="application/json",
+            )
 
         try:
             contents = await file.read()

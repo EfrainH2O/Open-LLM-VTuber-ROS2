@@ -67,6 +67,12 @@ async def handle_conversation_trigger(
     else:  # mic-audio-end
         user_input = received_data_buffers[client_uid]
         received_data_buffers[client_uid] = np.array([])
+        if context.asr_engine is None:   # [robot fork hook] asr_model: null, see FORK.md
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "message": "Speech recognition is off on this server (asr_model: null). Type instead.",
+            }))
+            return
 
     images = data.get("images")
     session_emoji = np.random.choice(EMOJI_LIST)

@@ -310,15 +310,19 @@ class SherpaOnnxASRConfig(I18nMixin):
 class ASRConfig(I18nMixin):
     """Configuration for Automatic Speech Recognition."""
 
-    asr_model: Literal[
-        "faster_whisper",
-        "whisper_cpp",
-        "whisper",
-        "azure_asr",
-        "fun_asr",
-        "groq_whisper_asr",
-        "sherpa_onnx_asr",
-    ] = Field(..., alias="asr_model")
+    # [robot fork hook] None (asr_model: null) turns ASR off, like vad_model: the robot hears through the
+    # server's Whisper and sends no audio here (FORK.md)
+    asr_model: Optional[
+        Literal[
+            "faster_whisper",
+            "whisper_cpp",
+            "whisper",
+            "azure_asr",
+            "fun_asr",
+            "groq_whisper_asr",
+            "sherpa_onnx_asr",
+        ]
+    ] = Field(None, alias="asr_model")
     azure_asr: Optional[AzureASRConfig] = Field(None, alias="azure_asr")
     faster_whisper: Optional[FasterWhisperConfig] = Field(None, alias="faster_whisper")
     whisper_cpp: Optional[WhisperCPPConfig] = Field(None, alias="whisper_cpp")
