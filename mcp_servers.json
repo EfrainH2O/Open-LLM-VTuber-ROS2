@@ -4,9 +4,9 @@
         "command": "mcp-server-time",
         "args": ["--local-timezone=Asia/Tokyo"]
       },
-      "ddg-search": {
-        "command": "duckduckgo-mcp-server",
-        "args": []
+      "kachaka": {
+        "command": "python",
+        "args": ["src/open_llm_vtuber/robot/kachaka_mcp.py"]
       }
     }
 }

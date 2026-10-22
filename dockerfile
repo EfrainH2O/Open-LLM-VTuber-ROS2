@@ -37,12 +37,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi; \
     uv sync --frozen --no-dev $skip
 
-# [robot fork hook] The AI's tools (mcp_servers.json), pinned and installed as plain commands on PATH, so
-# a start downloads nothing (with uvx they were resolved and downloaded again at every start).
+# [robot fork hook] The AI's tools (mcp_servers.json): time, pinned and installed as a plain command on
+# PATH, so a start downloads nothing (with uvx it was resolved and downloaded again at every start). The
+# other one, kachaka (the robot), is our own script in src/ and runs with the app's Python.
 ENV UV_TOOL_BIN_DIR=/usr/local/bin
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv tool install mcp-server-time==2026.10.10 \
- && uv tool install duckduckgo-mcp-server==0.7.0
+    uv tool install mcp-server-time==2026.10.10
 
 # Copy source & install project
 COPY . /app

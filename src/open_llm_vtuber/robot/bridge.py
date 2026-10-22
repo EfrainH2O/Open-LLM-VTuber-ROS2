@@ -28,6 +28,10 @@ own heard queue, teleop flag, emotion, speech worker and Kachaka timing (RobotLi
 cannot join groups, be invited into one, or switch character. A message for a missing or unknown
 robot is dropped, never given to a default agent.
 
+The AI moves its robot with the "kachaka" MCP tool (kachaka_mcp.py): robot-server POST
+/vtuber/action -> that robot's tablet -> Kachaka gRPC. Each robot client's tool process is bound to
+its robot here (_bind_robot_tool), so the LLM never chooses which robot it acts on.
+
 Disabled (plain upstream behaviour) unless ROBOT_SERVER_WS and VTUBER_TOKEN are set.
 """
 
@@ -45,6 +49,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from loguru import logger
 from pydub import AudioSegment
@@ -69,6 +74,7 @@ APPLY_AFTER_CONNECT_S = 4.0   # a reconnecting tablet needs its Live2D model loa
 EXPRESSION_CLIP_MS = 100      # silent carrier for an expression change (see expression_payload)
 ROBOT_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 LEGACY_ROBOT = "robot-1"      # what robot-server registers the old shared ROBOT_AUTH_TOKEN as
+ROBOT_TOOL = "kachaka"        # the AI's robot tool in mcp_servers.json (kachaka_mcp.py)
 
 
 def valid_robot_id(robot_id) -> bool:
@@ -95,6 +101,13 @@ def verify_ticket(secret: str, ticket: str, now: float | None = None) -> str | N
 def robot_conf_uid(conf_uid: str, robot_id: str) -> str:
     """The robot's own chat-history folder: chat_history/<conf_uid>@<robot id>/."""
     return f"{conf_uid}@{robot_id}"
+
+
+def http_origin(ws_url: str) -> str:
+    """robot-server's HTTP origin from its WebSocket URL: ws://robot-server:8000/vtuber -> http://robot-server:8000."""
+    u = urlsplit(ws_url)
+    scheme = {"ws": "http", "wss": "https"}.get(u.scheme, u.scheme)
+    return f"{scheme}://{u.netloc}" if u.netloc else ""
 
 
 def _say_text(display: str) -> str:
@@ -224,6 +237,7 @@ class RobotBridge:
             return
         link = self.link(robot_id)
         ctx.character_config.conf_uid = robot_conf_uid(ctx.character_config.conf_uid, robot_id)
+        self._bind_robot_tool(ctx, robot_id)   # before the agent is built with this context's tools
         if link.agent is None:
             ctx.agent_engine = None   # init_agent keeps an existing agent: build this robot's own
             await ctx.init_agent(ctx.character_config.agent_config, ctx.character_config.persona_prompt)
@@ -231,6 +245,17 @@ class RobotBridge:
             logger.info(f"🤖 {robot_id}: own agent (memory) created")
         ctx.agent_engine = link.agent
         ctx.history_uid = link.history_uid
+
+    def _bind_robot_tool(self, ctx: "ServiceContext", robot_id: str) -> None:
+        """This robot client's "kachaka" tool acts on this robot only: its process (started lazily by
+        the context's own MCP client, from the context's own server registry) gets the robot id and
+        the way to robot-server. Other clients' processes get neither and answer "no robot"."""
+        registry = getattr(ctx, "mcp_server_registery", None)
+        server = registry.get_server(ROBOT_TOOL) if registry is not None else None
+        if server is None:
+            return   # MCP off, or the tool is not configured
+        server.env = {**(server.env or {}), "KACHAKA_ROBOT_ID": robot_id,
+                      "ROBOT_SERVER_URL": http_origin(self.url), "VTUBER_TOKEN": self.token}
 
     def attach(self, client_uid: str, robot_id: str) -> None:
         self.pending.pop(client_uid, None)

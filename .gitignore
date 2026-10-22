@@ -74,5 +74,6 @@ conf.yaml.backup
 tmp/
 private/
 mcp_servers.json
-
+FORK.md
+tests/
 .vscode/
