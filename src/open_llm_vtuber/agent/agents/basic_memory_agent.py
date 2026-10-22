@@ -28,6 +28,7 @@ from ...mcpp.tool_manager import ToolManager
 from ...mcpp.json_detector import StreamJSONDetector
 from ...mcpp.types import ToolCallObject
 from ...mcpp.tool_executor import ToolExecutor
+from ...robot.tool_memory import remember_tool_round  # [robot fork hook]
 
 
 class BasicMemoryAgent(AgentInterface):
@@ -541,8 +542,7 @@ class BasicMemoryAgent(AgentInterface):
 
             elif pending_tool_calls and assistant_message_for_api:
                 messages.append(assistant_message_for_api)
-                if current_turn_text:
-                    self._add_message(current_turn_text, "assistant")
+                # [robot fork hook] the text goes into memory with its tool call, after the results
 
                 tool_results_for_llm = []
                 if not self._tool_executor:
@@ -571,6 +571,9 @@ class BasicMemoryAgent(AgentInterface):
 
                 if tool_results_for_llm:
                     messages.extend(tool_results_for_llm)
+                # [robot fork hook] keep the call and its result in memory, not only the text around
+                # it: later turns would see actions claimed with no call and imitate them (robot/tool_memory.py)
+                remember_tool_round(self, assistant_message_for_api, tool_results_for_llm)
                 continue
 
             else:

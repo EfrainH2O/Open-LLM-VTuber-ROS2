@@ -142,6 +142,7 @@ class RobotLink:
     teleop: bool = False           # teleoperated: the AI may not act through this robot
     expression: str = ""           # emotion picked on its operator's wheel, kept on its avatar
     pending_heard: str = ""        # heard while it was answering: its next turn
+    spoken_turn: asyncio.Task | None = None   # the turn its Kachaka is speaking: hears nothing meanwhile
     speech: ExternalSpeech | None = None
 
 
@@ -347,6 +348,7 @@ class RobotBridge:
             return
         if say:
             logger.info(f"🗣️ {link.robot_id} Kachaka says: {say}")
+            self._kachaka_speaks(link)
             await self.send_speak(link.robot_id, say)
 
     # --- teleoperation gate ---------------------------------------------------------------
@@ -377,15 +379,20 @@ class RobotBridge:
     async def on_heard(self, robot_id: str, text: str) -> None:
         """[robot fork hook] Someone near the robot said `text` (its tablet mic, Whisper on the server).
         It becomes that robot client's next turn, as if typed on the tablet, so the AI answers through
-        its avatar and Kachaka. Heard while an answer still runs: it waits, merged with anything else
-        heard meanwhile, and goes in when that turn ends. The place for another answer policy later
-        (wake word, LLM decides), and for attaching the tablet camera's latest still ("images")."""
+        its avatar and Kachaka. Heard while an answer is being prepared: it waits, merged with anything
+        else heard meanwhile, for when that turn ends. Once Kachaka starts speaking the answer, that
+        queue is dropped and nothing heard counts until the turn ends (_kachaka_speaks). The place
+        for another answer policy later (wake word, LLM decides), and for attaching the tablet
+        camera's latest still ("images")."""
         link = self.link(robot_id)
         ws = self._connection(link)
         if link.teleop or ws is None:
             logger.info(f"👂 {robot_id} heard but not answered ({'teleoperated' if link.teleop else 'no tablet'}): {text}")
             return
         running = self.ws_handler.current_conversation_tasks.get(link.uid)
+        if running is not None and not running.done() and running is link.spoken_turn:
+            logger.info(f"👂 {robot_id} heard while Kachaka speaks, dropped: {text}")
+            return
         if running is not None and not running.done():
             if not link.pending_heard:
                 running.add_done_callback(lambda _: asyncio.ensure_future(self._heard_turn(robot_id)))
@@ -395,6 +402,18 @@ class RobotBridge:
         logger.info(f"👂 {robot_id} heard: {text}")
         await ws.send_text(json.dumps({"type": "user-input-transcription", "text": text}))
         await self.ws_handler._handle_conversation_trigger(ws, link.uid, {"type": "text-input", "text": text})
+
+    def _kachaka_speaks(self, link: RobotLink) -> None:
+        """Kachaka speaks a sentence of the running turn: what was heard and not yet answered is
+        dropped, and so is anything heard until the turn ends (the tablet also drops the speech
+        it had not sent yet, see robot-server media.py)."""
+        running = self.ws_handler.current_conversation_tasks.get(link.uid) if link.uid else None
+        if running is None or running.done():
+            return
+        link.spoken_turn = running
+        if link.pending_heard:
+            logger.info(f"👂 {link.robot_id} Kachaka speaks, dropped what it had not answered: {link.pending_heard}")
+            link.pending_heard = ""
 
     async def _heard_turn(self, robot_id: str) -> None:
         link = self.link(robot_id)

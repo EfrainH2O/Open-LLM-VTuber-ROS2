@@ -17,6 +17,7 @@ from starlette.staticfiles import StaticFiles as StarletteStaticFiles
 from .routes import init_client_ws_route, init_webtool_routes, init_proxy_route
 from .service_context import ServiceContext
 from .config_manager.utils import Config
+from .robot.frontend import CollapsedPanels  # [robot fork hook]
 
 
 # Create a custom StaticFiles class that adds CORS headers
@@ -51,6 +52,11 @@ class AvatarStaticFiles(CORSStaticFiles):
             return Response("Forbidden file type", status_code=403)
         response = await super().get_response(path, scope)
         return response
+
+
+class FrontendStaticFiles(CollapsedPanels, CORSStaticFiles):
+    """[robot fork hook] The frontend: CORS headers, and the page starts showing only the
+    avatar (chat-history sidebar and text-input footer collapsed, see robot/frontend.py)."""
 
 
 class WebSocketServer:
@@ -144,7 +150,7 @@ class WebSocketServer:
         # Mount main frontend last (as catch-all)
         self.app.mount(
             "/",
-            CORSStaticFiles(directory="frontend", html=True),
+            FrontendStaticFiles(directory="frontend", html=True),  # [robot fork hook]
             name="frontend",
         )
 
