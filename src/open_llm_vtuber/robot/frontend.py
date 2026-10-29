@@ -1,14 +1,17 @@
-"""The VTuber page starts showing only the avatar.
+"""The VTuber page as the robot fork serves it: only the avatar at start, centered on its face.
 
 Upstream's frontend (the `frontend` submodule, a built bundle) opens with the chat-history sidebar
 and the text-input footer expanded. Their state is two `useState` defaults in `AppContent`, saved
 nowhere, so `collapse_panels` flips them in the bundle as it is served: both panels start
-collapsed, and their chevrons still open them. The submodule itself stays untouched.
+collapsed, and their chevrons still open them. `face_center.js` is appended to the bundle: with
+`faceCenter` in the model's model_dict.json entry, each loaded model is moved once so its face is
+centered (see that file). The submodule itself stays untouched.
 
 The patched bundle is served from memory with its own ETag, and index.html asks for it under a
 new URL (`?robot=<hash>`), so a browser or tablet WebView that cached upstream's bundle cannot keep
-showing the open panels. If a frontend update changes that code, both files are served as they
-are and a warning is logged (tests/robot_fork_test.py checks the bundle in the submodule).
+showing the open panels. If a frontend update changes the panels' code, they start open and a
+warning is logged; if it is no longer the bundle this expects (no `AppContent`), both files are
+served as they are (tests/robot_fork_test.py checks the bundle in the submodule).
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from pathlib import Path
 
 from loguru import logger
 from starlette.datastructures import Headers
@@ -28,6 +32,8 @@ _PANELS = re.compile(
     r"(\),\[[\w$]+,[\w$]+\]=(?:[\w$]+\.)?useState\()!1\)"
 )
 _BUNDLE_SRC = re.compile(r'(<script type="module"[^>]*\bsrc=")([^"?]+\.js)(")')
+_APP = "function AppContent()"   # marks the app bundle
+FACE_CENTER = Path(__file__).with_name("face_center.js").read_text(encoding="utf-8")
 
 
 def collapse_panels(js: str) -> str | None:
@@ -41,9 +47,9 @@ def _read(path: str) -> str:
         return f.read()
 
 
-class CollapsedPanels:
+class RobotFrontend:
     """Mixin for the frontend's StaticFiles mount (server.py): index.html and the app bundle it
-    loads are served patched; every other file as upstream does."""
+    loads are served patched (panels collapsed, face centered); every other file as upstream does."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -78,7 +84,7 @@ class CollapsedPanels:
 
     def _bundle(self, path: str) -> tuple[bytes, str] | None:
         """The patched app bundle and its sha1, cached until the file changes; None if this file
-        is not the app bundle (or upstream changed the code and it cannot be patched)."""
+        is not the app bundle."""
         try:
             st = os.stat(path)
         except OSError:
@@ -87,11 +93,13 @@ class CollapsedPanels:
         cached = self._bundles.get(path)
         if cached is None or cached[0] != key:
             js = _read(path)
-            patched = collapse_panels(js)
-            if patched is None and "function AppContent()" in js and not self._warned:
-                self._warned = True
-                logger.warning("robot fork: the frontend bundle changed, its panels start open (robot/frontend.py)")
-            body = patched.encode() if patched is not None else None
+            body = None
+            if _APP in js:
+                collapsed = collapse_panels(js)
+                if collapsed is None and not self._warned:
+                    self._warned = True
+                    logger.warning("robot fork: the frontend bundle changed, its panels start open (robot/frontend.py)")
+                body = ((collapsed or js) + "\n" + FACE_CENTER).encode()
             cached = (key, body, hashlib.sha1(body).hexdigest() if body else "")
             self._bundles[path] = cached
         return (cached[1], cached[2]) if cached[1] else None
