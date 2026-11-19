@@ -133,6 +133,7 @@ character_config:
         # 设置为 -1 表示模型将永远保留在内存中（即使退出 open llm vtuber 之后也是）
         keep_alive: -1
         unload_at_exit: True # 退出时从内存中卸载模型
+        # think: False # 不先思考直接回答（发送 reasoning_effort 'none'）；不设置 = 模型默认
 
       lmstudio_llm:
         base_url: 'http://localhost:1234/v1'

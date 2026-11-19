@@ -15,10 +15,13 @@ class OllamaLLM(AsyncLLM):
         temperature: float = 1.0,
         keep_alive: float = -1,
         unload_at_exit: bool = True,
+        think: bool | None = None,
     ):
         self.keep_alive = keep_alive
         self.unload_at_exit = unload_at_exit
         self.cleaned = False
+        # Ollama's /v1 ignores `think`; it maps `reasoning_effort` "none" to no thinking
+        # (checked on Ollama 0.33.3 with qwen3.5, which also ignores a /no_think tag).
         super().__init__(
             model=model,
             base_url=base_url,
@@ -26,6 +29,7 @@ class OllamaLLM(AsyncLLM):
             organization_id=organization_id,
             project_id=project_id,
             temperature=temperature,
+            extra_body={"reasoning_effort": "none"} if think is False else None,
         )
         try:
             # preload model

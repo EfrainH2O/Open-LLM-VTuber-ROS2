@@ -10,15 +10,20 @@ message with the robot it is about ("robot": <id>):
                         {"type":"teleop","robot","on"}     that robot is (no longer) teleoperated
                         {"type":"expression","robot","name"}  emotion from its operator's wheel
                         {"type":"spoke","robot","chars","ms"} a real Kachaka utterance, to learn its speed
+                        {"type":"voice","robot","output"}  where that robot is heard: "robot" (its own
+                                                           speaker, the default) or "tablet" (it has
+                                                           no speech service)
 - here -> robot-server: {"type":"emotions","names"}        the avatar's emotions (same character everywhere)
                         {"type":"speak","robot","text"}    that robot's Kachaka says this sentence now
 
 Each robot tablet's WebView connects to /client-ws?robot_ticket=<ticket> and is that robot's
 "robot client". robot-server hands the tablet the ticket (signed with VTUBER_TOKEN, see
 verify_ticket), so the WebView never needs the tablet's own token. For a robot client, every
-response (operator speech or LLM reply) is voiced by its Kachaka: audio payloads become muted
-mouth tracks timed to that Kachaka (lipsync.py), and when the tablet starts playing a sentence
-(audio-play-start) the sentence goes to that robot. Its WebView has no microphone (the tablet app
+response (operator speech or LLM reply) is voiced by the robot's voice output (voice.py). By
+default that is its Kachaka: audio payloads become muted mouth tracks timed to that Kachaka
+(lipsync.py), and when the tablet starts playing a sentence (audio-play-start) the sentence goes
+to that robot. A robot with no speech service is voiced by its tablet instead: the TTS audio is
+played aloud there and nothing is sent to the robot. Its WebView has no microphone (the tablet app
 owns it and sends it to Whisper on the server: "heard"), so upstream's start-mic greeting is not
 sent to it; its VAD could only fail ("Failed to start VAD").
 
@@ -55,16 +60,15 @@ from loguru import logger
 from pydub import AudioSegment
 
 from ..chat_history_manager import create_new_history, get_metadata
-from ..utils.tts_preprocessor import tts_filter as filter_text
 from .external_speech import OPERATOR_SPEECH, ExternalSpeech
-from .lipsync import KachakaTiming, retime_payload, speakable_chars, synth_payload
+from .lipsync import KachakaTiming
+# SAY_KEY, SOURCE_KEY, VOICE_KEY: extra display_text fields; the frontend echoes display_text in audio-play-start
+from .voice import DEFAULT_OUTPUT, OUTPUTS, SAY_KEY, SOURCE_KEY, VOICE_KEY, VoiceOutput, output_of, say_text
 
 if TYPE_CHECKING:
     from ..service_context import ServiceContext
     from ..websocket_handler import WebSocketHandler
 
-SAY_KEY = "robot_say"   # extra display_text field: the frontend echoes display_text in audio-play-start
-SOURCE_KEY = "robot_source"   # "operator" or "ai"
 # Conversation triggers that make the AI answer; refused on the robot while it is teleoperated.
 AI_TRIGGERS = {"mic-audio-end", "text-input", "ai-speak-signal"}
 # Would mix a robot's conversation with other clients' or load another character's memory.
@@ -110,15 +114,6 @@ def http_origin(ws_url: str) -> str:
     return f"{scheme}://{u.netloc}" if u.netloc else ""
 
 
-def _say_text(display: str) -> str:
-    """What Kachaka should say for a displayed sentence: same filtering as the TTS input
-    (drops [emotion] tags, brackets, asterisks...)."""
-    return filter_text(
-        text=display, remove_special_char=True, ignore_brackets=True,
-        ignore_parentheses=True, ignore_asterisks=True, ignore_angle_brackets=True,
-    ).strip()
-
-
 def _is_start_mic(data: str) -> bool:
     """Upstream's {"type": "control", "text": "start-mic"}, sent to every client on connect."""
     if len(data) > 64 or "start-mic" not in data:
@@ -135,6 +130,7 @@ class RobotLink:
     """Everything the VTuber keeps for one robot. Nothing in here is shared with another robot."""
     robot_id: str
     timing: KachakaTiming          # this Kachaka's learned speaking rate
+    voice: VoiceOutput = DEFAULT_OUTPUT   # where it is heard: its own speaker, or its tablet (voice.py)
     uid: str | None = None         # its tablet WebView's client uid, while connected
     ctx: "ServiceContext | None" = None   # that client's context, while connected
     agent: object = None           # its own LLM agent (memory), kept across WebView reconnects
@@ -142,12 +138,13 @@ class RobotLink:
     teleop: bool = False           # teleoperated: the AI may not act through this robot
     expression: str = ""           # emotion picked on its operator's wheel, kept on its avatar
     pending_heard: str = ""        # heard while it was answering: its next turn
-    spoken_turn: asyncio.Task | None = None   # the turn its Kachaka is speaking: hears nothing meanwhile
+    spoken_turn: asyncio.Task | None = None   # the turn the robot is speaking: hears nothing meanwhile
     speech: ExternalSpeech | None = None
 
 
 class RobotWebSocket:
-    """Wraps a robot client's WebSocket: audio payloads become mouth tracks timed to its Kachaka."""
+    """Wraps a robot client's WebSocket: audio payloads go through the robot's voice output
+    (mouth tracks timed to its Kachaka, or the TTS audio as it is for the tablet's speaker)."""
 
     def __init__(self, ws, bridge: "RobotBridge", robot_id: str):
         self._ws = ws
@@ -318,38 +315,38 @@ class RobotBridge:
         return False
 
     def transform_audio(self, data: str, operator: bool = False, robot_id: str = "") -> str:
-        """Runs in a worker thread: re-time one audio payload for that robot's Kachaka."""
+        """Runs in a worker thread: one audio payload, prepared for that robot's voice output."""
         try:
-            timing = self.link(robot_id).timing
+            link = self.link(robot_id)
             payload = json.loads(data)
             display = payload.get("display_text") or {}
-            say = _say_text(display.get("text", ""))
+            say = say_text(display.get("text", ""))
             if display:
-                display[SAY_KEY] = say
                 display[SOURCE_KEY] = "operator" if operator else "ai"
-            if payload.get("audio") and say:
-                payload = retime_payload(payload, timing.estimate_ms(say), timing.lead_ms)
-            elif say:   # TTS failed (e.g. edge-tts refused): Kachaka still speaks, mouth synthesized
-                payload = synth_payload(payload, speakable_chars(say), timing.estimate_ms(say), timing.lead_ms)
-            return json.dumps(payload)
+                display[VOICE_KEY] = link.voice.name
+            return json.dumps(link.voice.prepare(payload, say, link.timing))
         except Exception as e:  # never lose a sentence because of the mouth track
-            logger.warning(f"Could not re-time audio for Kachaka: {e}")
+            logger.warning(f"Could not prepare audio for {robot_id}'s voice: {e}")
             return data
 
     async def on_audio_play_start(self, client_uid: str, data: dict) -> None:
-        """A robot's tablet just started mouthing a sentence: its Kachaka says it now."""
+        """A robot's tablet just started playing a sentence: the robot says it now. With the robot's
+        own speaker that is a "speak" command; with the tablet's speaker the audio is the voice."""
         link = self.client_link(client_uid)
         if link is None:
             return
         display = data.get("display_text") or {}
-        say = (display.get(SAY_KEY) or "").strip()
+        voice = output_of(display)   # the output this payload was prepared for
+        say = voice.said(display)
         if link.teleop and display.get(SOURCE_KEY) != "operator":
-            logger.info(f"{link.robot_id} teleoperated: AI sentence not spoken on Kachaka: {say}")
+            # no speak command; a tablet that is the voice mutes the sentence itself
+            logger.info(f"{link.robot_id} teleoperated: AI sentence not spoken: {say}")
             return
         if say:
-            logger.info(f"🗣️ {link.robot_id} Kachaka says: {say}")
-            self._kachaka_speaks(link)
-            await self.send_speak(link.robot_id, say)
+            logger.info(f"🗣️ {link.robot_id} says ({voice.name}): {say}")
+            self._robot_speaks(link)
+            if voice.command:
+                await self.send_speak(link.robot_id, say)
 
     # --- teleoperation gate ---------------------------------------------------------------
     def set_teleop(self, robot_id: str, on: bool) -> None:
@@ -380,8 +377,8 @@ class RobotBridge:
         """[robot fork hook] Someone near the robot said `text` (its tablet mic, Whisper on the server).
         It becomes that robot client's next turn, as if typed on the tablet, so the AI answers through
         its avatar and Kachaka. Heard while an answer is being prepared: it waits, merged with anything
-        else heard meanwhile, for when that turn ends. Once Kachaka starts speaking the answer, that
-        queue is dropped and nothing heard counts until the turn ends (_kachaka_speaks). The place
+        else heard meanwhile, for when that turn ends. Once the robot starts speaking the answer, that
+        queue is dropped and nothing heard counts until the turn ends (_robot_speaks). The place
         for another answer policy later (wake word, LLM decides), and for attaching the tablet
         camera's latest still ("images")."""
         link = self.link(robot_id)
@@ -391,7 +388,7 @@ class RobotBridge:
             return
         running = self.ws_handler.current_conversation_tasks.get(link.uid)
         if running is not None and not running.done() and running is link.spoken_turn:
-            logger.info(f"👂 {robot_id} heard while Kachaka speaks, dropped: {text}")
+            logger.info(f"👂 {robot_id} heard while the robot speaks, dropped: {text}")
             return
         if running is not None and not running.done():
             if not link.pending_heard:
@@ -403,16 +400,16 @@ class RobotBridge:
         await ws.send_text(json.dumps({"type": "user-input-transcription", "text": text}))
         await self.ws_handler._handle_conversation_trigger(ws, link.uid, {"type": "text-input", "text": text})
 
-    def _kachaka_speaks(self, link: RobotLink) -> None:
-        """Kachaka speaks a sentence of the running turn: what was heard and not yet answered is
-        dropped, and so is anything heard until the turn ends (the tablet also drops the speech
-        it had not sent yet, see robot-server media.py)."""
+    def _robot_speaks(self, link: RobotLink) -> None:
+        """The robot speaks a sentence of the running turn (its Kachaka, or its tablet's speaker):
+        what was heard and not yet answered is dropped, and so is anything heard until the turn ends
+        (the tablet also drops the speech it had not sent yet, see robot-server media.py)."""
         running = self.ws_handler.current_conversation_tasks.get(link.uid) if link.uid else None
         if running is None or running.done():
             return
         link.spoken_turn = running
         if link.pending_heard:
-            logger.info(f"👂 {link.robot_id} Kachaka speaks, dropped what it had not answered: {link.pending_heard}")
+            logger.info(f"👂 {link.robot_id} speaks, dropped what it had not answered: {link.pending_heard}")
             link.pending_heard = ""
 
     async def _heard_turn(self, robot_id: str) -> None:
@@ -515,9 +512,19 @@ class RobotBridge:
                 return
             link = self.link(robot_id)
             if link.speech:
-                link.speech.say(text)                  # through its avatar, Kachaka speaks on play start
+                link.speech.say(text)                  # through its avatar, the robot speaks on play start
             else:
-                await self.send_speak(robot_id, text)  # no avatar on that tablet: speak directly
+                # No avatar page on that tablet, so no TTS audio can play there: the robot says it
+                # itself if it can, whatever its voice output is (a robot with no speech refuses it).
+                await self.send_speak(robot_id, text)
+        elif kind == "voice":
+            # [robot fork hook] where this robot is heard: chosen on its tablet (the "Kachaka voice"
+            # switch, off by default) and only "robot" if the robot can speak
+            voice = OUTPUTS.get(msg.get("output"))
+            link = self.link(robot_id)
+            if voice is not None and voice is not link.voice:
+                link.voice = voice
+                logger.info(f"🔈 {robot_id} voice output: {voice.name}")
         elif kind == "heard" and isinstance(msg.get("text"), str) and msg["text"].strip():
             await self.on_heard(robot_id, msg["text"].strip())
         elif kind == "teleop":

@@ -1,5 +1,5 @@
 # config_manager/llm.py
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Optional
 from pydantic import BaseModel, Field
 from .i18n import I18nMixin, Description
 
@@ -96,6 +96,7 @@ class OllamaConfig(OpenAICompatibleConfig):
     llm_api_key: str = Field("default_api_key", alias="llm_api_key")
     keep_alive: float = Field(-1, alias="keep_alive")
     unload_at_exit: bool = Field(True, alias="unload_at_exit")
+    think: Optional[bool] = Field(None, alias="think")
     interrupt_method: Literal["system", "user"] = Field(
         "system", alias="interrupt_method"
     )
@@ -114,6 +115,11 @@ class OllamaConfig(OpenAICompatibleConfig):
         "unload_at_exit": Description(
             en="Unload the model when the program exits.",
             zh="是否在程序退出时卸载模型。",
+        ),
+        "think": Description(
+            en="False: the model answers without thinking first (sends reasoning_effort 'none'). "
+            "Unset: the model's default.",
+            zh="False：模型不先思考直接回答（发送 reasoning_effort 'none'）。不设置：模型默认行为。",
         ),
     }
 

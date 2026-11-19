@@ -134,6 +134,7 @@ character_config:
         # set to -1 to keep the model in memory forever (even after exiting open llm vtuber)
         keep_alive: -1
         unload_at_exit: True # unload the model from memory at exit
+        # think: False # answer without thinking first (sends reasoning_effort 'none'); unset = model default
 
       lmstudio_llm:
         base_url: 'http://localhost:1234/v1'
