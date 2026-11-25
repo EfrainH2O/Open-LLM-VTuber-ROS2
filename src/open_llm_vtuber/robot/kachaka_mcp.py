@@ -1,7 +1,9 @@
 """The AI's robot tool: an MCP server (stdio) named "kachaka" in mcp_servers.json (CLAUDE.md 3.7).
 
-Each tool call becomes one robot action: POST robot-server /vtuber/action -> that robot's tablet ->
-Kachaka's gRPC API. The server cannot reach Kachaka itself (only the tablet is on the robot's LAN).
+Each robot tool call becomes one robot action: POST robot-server /vtuber/action -> that robot's
+tablet -> Kachaka's gRPC API. The server cannot reach Kachaka itself (only the tablet is on the
+robot's LAN). `call_operator` instead asks robot-server (POST /vtuber/call-operator) to call a human,
+like the tablet's call button, with the reason the LLM writes (CLAUDE.md 3.9).
 
 The process acts on one robot only. The LLM never names the robot: the bridge (bridge.py,
 `_bind_robot_tool`) starts this server for a robot client with
@@ -28,22 +30,23 @@ import urllib.request
 from mcp.server.fastmcp import FastMCP
 
 HTTP_TIMEOUT_S = 20   # robot-server gives up on the tablet after 12 s
+REASON_MAX_CHARS = 300   # what robot-server keeps of a call's reason
 
 mcp = FastMCP(
     "kachaka",
-    instructions="Moves the Kachaka robot you are on. Actions start the robot and return at once; "
-    "check robot_status for names and for what the robot is doing.",
+    instructions="Moves the Kachaka robot you are on, and calls a human operator to it. Actions start "
+    "the robot and return at once; check robot_status for names and for what the robot is doing.",
 )
 
 
-def _post(action: str, args: dict[str, str]) -> str:
+def _post(path: str, body: dict) -> str:
+    """POST robot-server `path` for the bound robot; its {"ok", "text"} answer as one line for the LLM."""
     robot = os.environ.get("KACHAKA_ROBOT_ID", "")
     base = os.environ.get("ROBOT_SERVER_URL", "").rstrip("/")
     if not robot or not base:
         return "Not available: this conversation is not connected to a robot."
-    body = json.dumps({"robot": robot, "action": action, "args": args}).encode()
     req = urllib.request.Request(
-        f"{base}/vtuber/action", data=body, method="POST",
+        f"{base}{path}", data=json.dumps({"robot": robot, **body}).encode(), method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {os.environ.get('VTUBER_TOKEN', '')}"},
     )
     try:
@@ -57,8 +60,10 @@ def _post(action: str, args: dict[str, str]) -> str:
     return f"OK: {text}" if out.get("ok") is True else f"Not done: {text}"
 
 
-async def _act(action: str, **args: str) -> str:
-    return await asyncio.to_thread(_post, action, {k: v for k, v in args.items() if v})
+async def _act(action: str, **args) -> str:
+    """One robot action, run by the robot's tablet. Empty arguments are left out."""
+    args = {k: v for k, v in args.items() if v}
+    return await asyncio.to_thread(_post, "/vtuber/action", {"action": action, "args": args})
 
 
 @mcp.tool()
@@ -73,6 +78,14 @@ async def move_to_location(location: str) -> str:
     """Drive the robot to one of its saved locations, given by its exact name from robot_status.
     Returns as soon as the robot starts moving."""
     return await _act("move_to", location=location)
+
+
+@mcp.tool()
+async def visit_locations(locations: list[str], wait_seconds: float = 0) -> str:
+    """Drive the robot through several saved locations in the given order (exact names from
+    robot_status, at most 10), staying wait_seconds (0-300) at each one before the last, where it
+    stays. Returns as soon as the robot starts toward the first; robot_status shows how far it got."""
+    return await _act("route", locations=locations, wait_s=wait_seconds)
 
 
 @mcp.tool()
@@ -96,8 +109,18 @@ async def go_charge() -> str:
 
 @mcp.tool()
 async def stop_robot() -> str:
-    """Cancel what the robot is doing now (moving, carrying a shelf, going to charge)."""
+    """Cancel what the robot is doing now (moving, a route, carrying a shelf, going to charge)."""
     return await _act("cancel")
+
+
+@mcp.tool()
+async def call_operator(reason: str) -> str:
+    """Call a human member of staff, who can take over this robot and talk through it. Use it when
+    someone asks for a person or staff, when you cannot help them (a question you cannot answer, a
+    complaint, something the robot cannot do), or when someone seems hurt, unwell, lost or in danger.
+    reason: one short sentence for the staff saying who needs what. Afterwards tell the person that
+    staff have been called. Calling again while a call waits does not make a new one."""
+    return await asyncio.to_thread(_post, "/vtuber/call-operator", {"reason": reason.strip()[:REASON_MAX_CHARS]})
 
 
 if __name__ == "__main__":

@@ -13,7 +13,12 @@ message with the robot it is about ("robot": <id>):
                         {"type":"voice","robot","output"}  where that robot is heard: "robot" (its own
                                                            speaker, the default) or "tablet" (it has
                                                            no speech service)
-- here -> robot-server: {"type":"emotions","names"}        the avatar's emotions (same character everywhere)
+                        {"type":"avatar","robot","name"}   its tablet's settings picked this avatar model
+- here -> robot-server: {"type":"emotions","names"}        the default avatar's emotions (every robot)
+                        {"type":"emotions","robot","names"}  that robot's avatar emotions: its tablet
+                                                           picked its own model (avatar.py)
+                        {"type":"avatar","robot","current","names"}  that robot's avatar model and the
+                                                           ones it can pick (for its tablet's settings)
                         {"type":"speak","robot","text"}    that robot's Kachaka says this sentence now
 
 Each robot tablet's WebView connects to /client-ws?robot_ticket=<ticket> and is that robot's
@@ -31,7 +36,8 @@ Robots never share context (hard rule): each robot has its own agent (the LLM's 
 across WebView reconnects; its own chat-history folder (conf_uid "<conf_uid>@<robot id>"); and its
 own heard queue, teleop flag, emotion, speech worker and Kachaka timing (RobotLink). Robot clients
 cannot join groups, be invited into one, or switch character. A message for a missing or unknown
-robot is dropped, never given to a default agent.
+robot is dropped, never given to a default agent. Each robot also has its own avatar model, picked
+on its tablet in the WebView's "Character Preset" menu, which lists models for a robot (avatar.py).
 
 The AI moves its robot with the "kachaka" MCP tool (kachaka_mcp.py): robot-server POST
 /vtuber/action -> that robot's tablet -> Kachaka gRPC. Each robot client's tool process is bound to
@@ -60,6 +66,9 @@ from loguru import logger
 from pydub import AudioSegment
 
 from ..chat_history_manager import create_new_history, get_metadata
+from ..live2d_model import Live2dModel
+from ..config_manager.utils import scan_config_alts_directory
+from .avatar import DEFAULT_FILE as AVATARS_FILE, PC_LABEL, AvatarStore, model_names, model_of_preset, preset_list, retarget_agent
 from .external_speech import OPERATOR_SPEECH, ExternalSpeech
 from .lipsync import KachakaTiming
 # SAY_KEY, SOURCE_KEY, VOICE_KEY: extra display_text fields; the frontend echoes display_text in audio-play-start
@@ -131,6 +140,7 @@ class RobotLink:
     robot_id: str
     timing: KachakaTiming          # this Kachaka's learned speaking rate
     voice: VoiceOutput = DEFAULT_OUTPUT   # where it is heard: its own speaker, or its tablet (voice.py)
+    model: Live2dModel | None = None      # avatar model its tablet picked (avatar.py); None: the default
     uid: str | None = None         # its tablet WebView's client uid, while connected
     ctx: "ServiceContext | None" = None   # that client's context, while connected
     agent: object = None           # its own LLM agent (memory), kept across WebView reconnects
@@ -185,6 +195,8 @@ class RobotBridge:
         self.by_uid: dict[str, str] = {}     # robot client uid -> robot id
         self.pending: dict[str, str] = {}    # client uid -> robot id, until its context is built
         self.known: set[str] | None = None   # robots registered on robot-server (None: not told yet)
+        self.avatars = AvatarStore(os.environ.get("ROBOT_AVATARS_FILE", AVATARS_FILE).strip() or None)
+        self._avatar_told: set[str] = set()   # robots told their avatar on this robot-server link
         self._conn = None
         self._task: asyncio.Task | None = None
 
@@ -193,8 +205,28 @@ class RobotBridge:
         link = self.robots.get(robot_id)
         if link is None:
             link = self.robots[robot_id] = RobotLink(
-                robot_id, KachakaTiming(chars_per_sec=self.chars_per_sec, lead_ms=self.lead_ms))
+                robot_id, KachakaTiming(chars_per_sec=self.chars_per_sec, lead_ms=self.lead_ms),
+                model=self._saved_model(robot_id))
         return link
+
+    def _saved_model(self, robot_id: str) -> Live2dModel | None:
+        """The avatar model this robot's tablet picked before (avatar.py), if it is still listed."""
+        name = self.avatars.get(robot_id)
+        if not name:
+            return None
+        if name in model_names():
+            try:
+                return Live2dModel(name)
+            except Exception as e:
+                logger.warning(f"🎨 {robot_id}: avatar {name} not loaded ({e})")
+        logger.warning(f"🎨 {robot_id}: saved avatar {name} is not in model_dict.json: default avatar")
+        return None
+
+    def avatar(self, link: RobotLink | None) -> Live2dModel | None:
+        """The robot's own avatar model, else the default one (conf.yaml's live2d_model_name)."""
+        if link is not None and link.model is not None:
+            return link.model
+        return getattr(getattr(self.ws_handler, "default_context_cache", None), "live2d_model", None)
 
     def client_link(self, client_uid: str) -> RobotLink | None:
         """The robot this client is the tablet of, None for any other client (e.g. a PC browser)."""
@@ -235,6 +267,7 @@ class RobotBridge:
             return
         link = self.link(robot_id)
         ctx.character_config.conf_uid = robot_conf_uid(ctx.character_config.conf_uid, robot_id)
+        self._use_avatar(ctx, link.model)       # before the agent is built with its emotion tags
         self._bind_robot_tool(ctx, robot_id)   # before the agent is built with this context's tools
         if link.agent is None:
             ctx.agent_engine = None   # init_agent keeps an existing agent: build this robot's own
@@ -243,6 +276,85 @@ class RobotBridge:
             logger.info(f"🤖 {robot_id}: own agent (memory) created")
         ctx.agent_engine = link.agent
         ctx.history_uid = link.history_uid
+        if getattr(link.agent, "_live2d_model", ctx.live2d_model) is not ctx.live2d_model:
+            await retarget_agent(ctx)   # the avatar was changed from the tablet while its page was closed
+
+    @staticmethod
+    def _use_avatar(ctx: "ServiceContext", model: Live2dModel | None) -> None:
+        """This robot client's context shows `model` (None: keeps the default it was cloned with).
+        Its conf_name becomes the model's name too: the WebView's "Character Preset" menu lists
+        models for a robot and marks the entry named like conf_name (avatar.py)."""
+        if model is not None:
+            ctx.live2d_model = model
+            ctx.character_config.live2d_model_name = model.live2d_model_name
+        if ctx.live2d_model is not None:
+            ctx.character_config.conf_name = ctx.live2d_model.live2d_model_name
+
+    @staticmethod
+    async def _send_model(websocket, client_uid: str, ctx: "ServiceContext") -> None:
+        """Upstream's set-model-and-conf: the frontend (re)loads the context's model."""
+        await websocket.send_text(json.dumps({
+            "type": "set-model-and-conf", "model_info": ctx.live2d_model.model_info,
+            "conf_name": ctx.character_config.conf_name, "conf_uid": ctx.character_config.conf_uid,
+            "client_uid": client_uid,
+        }))
+
+    async def switch_avatar(self, websocket, client_uid: str, link: RobotLink, name: str) -> None:
+        """[robot fork hook] This robot's avatar page picked another model in its menu."""
+        error = await self.set_avatar(link, name, page=websocket)
+        if error is not None:
+            await websocket.send_text(json.dumps({"type": "error", "message": error}))
+            if (ctx := self.ws_handler.client_contexts.get(client_uid)) is not None:
+                await self._send_model(websocket, client_uid, ctx)   # the frontend dropped its model: same one back
+
+    async def set_avatar(self, link: RobotLink, name: str, page=None) -> str | None:
+        """This robot shows avatar model `name` from now on, asked from its avatar page's menu
+        (`page`: that page's socket) or from its tablet's settings (robot-server "avatar"). Only this
+        robot changes: its avatar, its agent's emotion tags and its operator's wheel. The character,
+        its memory and its conversation stay, and the choice is saved for its next connections.
+        An error text, or None."""
+        if name not in model_names():
+            error = f"unknown avatar model: {name}"
+        else:
+            try:
+                model = Live2dModel(name)
+                error = None
+            except Exception as e:
+                error = f"avatar model {name} could not be loaded: {e}"
+        if error is not None:
+            logger.warning(f"🎨 {link.robot_id}: {error}")
+            await self.announce_avatar(link)   # its tablet shows the model it still has
+            return error
+        link.model = model
+        self.avatars.set(link.robot_id, name)
+        if link.expression and link.expression not in model.emo_map:
+            link.expression = ""   # robot-server drops it too once it gets the new emotions
+        ctx = link.ctx
+        ws = page or self._connection(link)
+        if ctx is not None:   # its avatar page is open: it shows the new model now
+            self._use_avatar(ctx, model)
+            await retarget_agent(ctx)
+            if ws is not None:
+                await self._send_model(ws, link.uid, ctx)
+                await ws.send_text(json.dumps({"type": "config-switched", "message": f"Avatar: {name}"}))
+        logger.info(f"🎨 {link.robot_id}: avatar model is now {name} (this robot only)")
+        await self.announce_emotions(link)
+        await self.announce_avatar(link)
+        if link.expression and ws is not None:   # the operator's emotion, on the new model once it has loaded
+            asyncio.get_running_loop().create_task(self.apply_expression(link.robot_id, delay=APPLY_AFTER_CONNECT_S))
+        return None
+
+    async def announce_avatar(self, link: RobotLink) -> None:
+        """This robot's avatar and the ones it can pick, for its tablet's settings (via robot-server)."""
+        if self._conn is None:
+            return   # sent when the link is up again (_set_known)
+        model = self.avatar(link)
+        msg = {"type": "avatar", "robot": link.robot_id, "names": model_names(),
+               "current": model.live2d_model_name if model is not None else None}
+        try:
+            await self._conn.send(json.dumps(msg, ensure_ascii=False))
+        except Exception as e:
+            logger.warning(f"{link.robot_id}'s avatar list not sent: {e}")
 
     def _bind_robot_tool(self, ctx: "ServiceContext", robot_id: str) -> None:
         """This robot client's "kachaka" tool acts on this robot only: its process (started lazily by
@@ -284,7 +396,8 @@ class RobotBridge:
         logger.info(f"🤖 {robot_id}: tablet disconnected")
 
     async def intercept(self, websocket, client_uid: str, data: dict) -> bool:
-        """[robot fork hook] Messages that would break a robot's isolation. True = handled here."""
+        """[robot fork hook] Messages that would break a robot's isolation, and its avatar menu
+        (a model list instead of the characters, avatar.py). True = handled here."""
         kind = data.get("type")
         link = self.client_link(client_uid)
         if kind in GROUP_OPS:
@@ -295,7 +408,14 @@ class RobotBridge:
                 return True
             return False
         if link is None:
-            return False
+            return await self._pc_menu(websocket, client_uid, kind, data)
+        if kind == "fetch-configs":
+            # its "Character Preset" menu lists avatar models: the character is fixed, the model is its own
+            await websocket.send_text(json.dumps({"type": "config-files", "configs": preset_list(model_names())}))
+            return True
+        if kind == "switch-config" and (name := model_of_preset(data.get("file"))) is not None:
+            await self.switch_avatar(websocket, client_uid, link, name)
+            return True
         if kind == "switch-config":
             logger.info(f"🤖 {link.robot_id}: switch-config refused (would load another memory)")
             await websocket.send_text(json.dumps({"type": "error", "message": "the robot's character is fixed"}))
@@ -313,6 +433,34 @@ class RobotBridge:
             await websocket.send_text(json.dumps({"type": "new-history-created", "history_uid": link.history_uid}))
             return True
         return False
+
+    async def _pc_menu(self, websocket, client_uid: str, kind, data: dict) -> bool:
+        """Any other client (a PC browser): its menu lists the characters as upstream, then the
+        avatar models ("Avatar: <name>"). A model picked there changes only this page, saved nowhere."""
+        ctx = self.ws_handler.client_contexts.get(client_uid)
+        if ctx is None:
+            return False
+        if kind == "fetch-configs":
+            configs = scan_config_alts_directory(ctx.system_config.config_alts_dir) + preset_list(model_names(), PC_LABEL)
+            await websocket.send_text(json.dumps({"type": "config-files", "configs": configs}))
+            return True
+        if kind != "switch-config" or (name := model_of_preset(data.get("file"))) is None:
+            return False   # a character: upstream's switch
+        try:
+            if name not in model_names():
+                raise KeyError(name)
+            model = Live2dModel(name)
+        except Exception as e:
+            await websocket.send_text(json.dumps({"type": "error", "message": f"avatar model {name}: {e}"}))
+            await self._send_model(websocket, client_uid, ctx)
+            return True
+        ctx.live2d_model = model
+        ctx.character_config.live2d_model_name = name
+        ctx.character_config.conf_name = PC_LABEL + name   # marks it in the menu
+        await self._send_model(websocket, client_uid, ctx)
+        await websocket.send_text(json.dumps({"type": "config-switched", "message": f"Avatar: {name}"}))
+        logger.info(f"🎨 client {client_uid}: avatar model {name} (this page only)")
+        return True
 
     def transform_audio(self, data: str, operator: bool = False, robot_id: str = "") -> str:
         """Runs in a worker thread: one audio payload, prepared for that robot's voice output."""
@@ -435,8 +583,11 @@ class RobotBridge:
             try:
                 async with connect(self.url, additional_headers={"Authorization": f"Bearer {self.token}"}) as conn:
                     self._conn, backoff = conn, 1.0
+                    self._avatar_told = set()   # this robot-server learns every robot's avatar again
                     logger.info(f"🤖 Connected to robot-server {self.url}")
                     await conn.send(json.dumps({"type": "emotions", "names": self.emotions()}))
+                    for robot_id in list(self.avatars.models):   # robots that picked their own avatar
+                        await self.announce_emotions(self.link(robot_id))
                     async for raw in conn:
                         await self._on_message(raw)
             except asyncio.CancelledError:
@@ -448,18 +599,28 @@ class RobotBridge:
             backoff = min(backoff * 2, 10.0)
 
     def _emo_map(self, link: RobotLink | None = None) -> dict:
-        """Live2D emotionMap (name -> expression index): the robot client's model, else the default."""
+        """Live2D emotionMap (name -> expression index): the robot client's model, else the robot's
+        own avatar, else the default."""
         ctx = link.ctx if link is not None else None
-        for source in (ctx, getattr(self.ws_handler, "default_context_cache", None)):
-            emo_map = getattr(getattr(source, "live2d_model", None), "emo_map", None)
+        for model in (getattr(ctx, "live2d_model", None), self.avatar(link)):
+            emo_map = getattr(model, "emo_map", None)
             if emo_map:
                 return emo_map
         return {}
 
-    def emotions(self) -> list[str]:
-        """The avatar's emotion names (Live2D emotionMap keys) for the operators' wheel, at most 8.
-        Every robot shows the same character, so one list serves all of them."""
-        return list(self._emo_map())[:EMOTIONS_MAX]
+    def emotions(self, link: RobotLink | None = None) -> list[str]:
+        """The avatar's emotion names (Live2D emotionMap keys) for the operator's wheel, at most 8:
+        this robot's avatar, else the default one (every robot that did not pick its own)."""
+        return list(self._emo_map(link))[:EMOTIONS_MAX]
+
+    async def announce_emotions(self, link: RobotLink) -> None:
+        """This robot's avatar emotions, for its operator's wheel (robot-server keeps them per robot)."""
+        if self._conn is None:
+            return   # sent when the link is up again (_run)
+        try:
+            await self._conn.send(json.dumps({"type": "emotions", "robot": link.robot_id, "names": self.emotions(link)}))
+        except Exception as e:
+            logger.warning(f"{link.robot_id}'s emotions not sent: {e}")
 
     def expression_payload(self, robot_id: str) -> str | None:
         """The robot operator's emotion as a frontend message. The frontend only sets expressions
@@ -534,14 +695,21 @@ class RobotBridge:
             self.link(robot_id).expression = msg["name"]
             logger.info(f"🎭 {robot_id} operator emotion: {msg['name']}")
             await self.apply_expression(robot_id)
+        elif kind == "avatar" and isinstance(msg.get("name"), str):
+            # [robot fork hook] its tablet's settings picked another avatar model (avatar.py)
+            await self.set_avatar(self.link(robot_id), msg["name"])
         elif kind == "spoke":
             timing = self.link(robot_id).timing
             timing.observe(int(msg.get("chars", 0)), int(msg.get("ms", 0)))
             logger.debug(f"{robot_id} Kachaka speaking rate now {timing.chars_per_sec:.2f} chars/s")
 
     async def _set_known(self, ids: set) -> None:
-        """The robots robot-server lists now. A tablet of a robot that was removed is cut off."""
+        """The robots robot-server lists now. A tablet of a robot that was removed is cut off. Each
+        newly listed robot is told its avatar and the ones it can pick (its tablet's settings)."""
         self.known = {i for i in ids if valid_robot_id(i)}
+        for robot_id in sorted(self.known - self._avatar_told):   # once per robot-server link
+            self._avatar_told.add(robot_id)
+            await self.announce_avatar(self.link(robot_id))
         for link in list(self.robots.values()):
             if link.robot_id not in self.known and (ws := self._connection(link)) is not None:
                 logger.warning(f"🤖 {link.robot_id} is no longer registered: closing its tablet's VTuber client")

@@ -9,9 +9,29 @@ each result, as the OpenAI API expects them.
 
 Only in-process memory: chat history files keep their human/AI text (upstream format), so after a
 VTuber restart the tool rounds of older turns are gone again.
+
+tools_for_round caps the tool rounds of one turn: upstream's loop asks the LLM again after every
+result, with no limit, and a model that answers each result with another call never speaks.
 """
 
 from __future__ import annotations
+
+from loguru import logger
+
+# Tool rounds in one turn before the LLM must answer in words. A request needs at most two
+# (robot_status for the names, then the action); a third leaves room for one more.
+MAX_TOOL_ROUNDS = 3
+
+
+def tools_for_round(tools: list | None, rounds_done: int) -> list | None:
+    """The tools offered to the next LLM request of a turn: none once the turn has had
+    MAX_TOOL_ROUNDS tool rounds, so that request is answered in words. nemotron-3.5-lightning, for
+    example, sometimes answers the result of call_operator with call_operator again or with
+    stop_robot, instead of telling the person that staff were called."""
+    if rounds_done < MAX_TOOL_ROUNDS:
+        return tools
+    logger.info(f"🔧 {rounds_done} tool rounds in this turn: the LLM answers without tools now")
+    return None
 
 
 def remember_tool_round(agent, call: dict, results: list[dict]) -> None:

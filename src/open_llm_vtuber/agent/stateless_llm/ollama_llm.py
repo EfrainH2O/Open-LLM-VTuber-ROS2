@@ -1,4 +1,5 @@
 import atexit
+import threading
 import requests
 from loguru import logger
 from .openai_compatible_llm import AsyncLLM
@@ -31,6 +32,16 @@ class OllamaLLM(AsyncLLM):
             temperature=temperature,
             extra_body={"reasoning_effort": "none"} if think is False else None,
         )
+        # [robot fork hook] the preload is only a warm-up: in a thread, so a slow or unreachable
+        # Ollama server never stops this server (each robot's agent is built while its tablet
+        # connects; a server that does not answer held everything for minutes)
+        threading.Thread(target=self._preload, args=(base_url, model, keep_alive), daemon=True).start()
+        # If keep_alive is less than 0, register cleanup to unload the model
+        if unload_at_exit:
+            atexit.register(self.cleanup)
+
+    @staticmethod
+    def _preload(base_url: str, model: str, keep_alive: float) -> None:
         try:
             # preload model
             logger.info("Preloading model for Ollama")
@@ -42,6 +53,7 @@ class OllamaLLM(AsyncLLM):
                         "model": model,
                         "keep_alive": keep_alive,
                     },
+                    timeout=(10, 600),   # [robot fork hook] connect, then loading a large model
                 )
             )
         except requests.exceptions.ConnectionError as e:
@@ -51,9 +63,6 @@ class OllamaLLM(AsyncLLM):
             )
         except Exception as e:
             logger.error(f"Failed to preload model: {e}")
-        # If keep_alive is less than 0, register cleanup to unload the model
-        if unload_at_exit:
-            atexit.register(self.cleanup)
 
     def __del__(self):
         """Destructor to unload the model"""

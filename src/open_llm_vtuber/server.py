@@ -17,7 +17,7 @@ from starlette.staticfiles import StaticFiles as StarletteStaticFiles
 from .routes import init_client_ws_route, init_webtool_routes, init_proxy_route
 from .service_context import ServiceContext
 from .config_manager.utils import Config
-from .robot.frontend import RobotFrontend  # [robot fork hook]
+from .robot.frontend import ROBOT_WEB_DIR, RobotFrontend  # [robot fork hook]
 
 
 # Create a custom StaticFiles class that adds CORS headers
@@ -146,6 +146,13 @@ class WebSocketServer:
             "/web-tool",
             CORSStaticFiles(directory="web_tool", html=True),
             name="web_tool",
+        )
+
+        # [robot fork hook] the fork's page runtime (Inochi2D renderer, robot/inochi2d.js)
+        self.app.mount(
+            "/robot-web",
+            CORSStaticFiles(directory=ROBOT_WEB_DIR, check_dir=False),
+            name="robot-web",
         )
 
         # Mount main frontend last (as catch-all)

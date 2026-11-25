@@ -28,7 +28,7 @@ from ...mcpp.tool_manager import ToolManager
 from ...mcpp.json_detector import StreamJSONDetector
 from ...mcpp.types import ToolCallObject
 from ...mcpp.tool_executor import ToolExecutor
-from ...robot.tool_memory import remember_tool_round  # [robot fork hook]
+from ...robot.tool_memory import remember_tool_round, tools_for_round  # [robot fork hook]
 
 
 class BasicMemoryAgent(AgentInterface):
@@ -411,6 +411,7 @@ class BasicMemoryAgent(AgentInterface):
         current_turn_text = ""
         pending_tool_calls: Union[List[ToolCallObject], List[Dict[str, Any]]] = []
         current_system_prompt = self._system
+        tool_rounds = 0  # [robot fork hook] tool rounds of this turn, capped (robot/tool_memory.py)
 
         while True:
             if self.prompt_mode_flag:
@@ -424,7 +425,7 @@ class BasicMemoryAgent(AgentInterface):
                 tools_for_api = None
             else:
                 current_system_prompt = self._system
-                tools_for_api = tools
+                tools_for_api = tools_for_round(tools, tool_rounds)  # [robot fork hook]
 
             stream = self._llm.chat_completion(
                 messages, current_system_prompt, tools=tools_for_api
@@ -574,6 +575,7 @@ class BasicMemoryAgent(AgentInterface):
                 # [robot fork hook] keep the call and its result in memory, not only the text around
                 # it: later turns would see actions claimed with no call and imitate them (robot/tool_memory.py)
                 remember_tool_round(self, assistant_message_for_api, tool_results_for_llm)
+                tool_rounds += 1  # [robot fork hook]
                 continue
 
             else:

@@ -65,6 +65,8 @@ tmp/
 private/
 legacy/
 chat_history/
+robot_state/
+robot-inochi2d/
 knowledge_base/
 submodules/MeloTTS
 openapi_*.json

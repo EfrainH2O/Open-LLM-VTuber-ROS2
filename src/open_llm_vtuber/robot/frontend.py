@@ -5,7 +5,8 @@ and the text-input footer expanded. Their state is two `useState` defaults in `A
 nowhere, so `collapse_panels` flips them in the bundle as it is served: both panels start
 collapsed, and their chevrons still open them. `face_center.js` is appended to the bundle: with
 `faceCenter` in the model's model_dict.json entry, each loaded model is moved once so its face is
-centered (see that file). The submodule itself stays untouched.
+centered (see that file). `inochi2d.js` too: an entry with `inochi2d` is drawn as an Inochi2D
+puppet over its hidden Live2D stand-in (see that file). The submodule itself stays untouched.
 
 The patched bundle is served from memory with its own ETag, and index.html asks for it under a
 new URL (`?robot=<hash>`), so a browser or tablet WebView that cached upstream's bundle cannot keep
@@ -34,6 +35,9 @@ _PANELS = re.compile(
 _BUNDLE_SRC = re.compile(r'(<script type="module"[^>]*\bsrc=")([^"?]+\.js)(")')
 _APP = "function AppContent()"   # marks the app bundle
 FACE_CENTER = Path(__file__).with_name("face_center.js").read_text(encoding="utf-8")
+# Inochi2D avatars (a model_dict.json entry with "inochi2d"), drawn by the runtime in ROBOT_WEB_DIR
+INOCHI2D = Path(__file__).with_name("inochi2d.js").read_text(encoding="utf-8")
+ROBOT_WEB_DIR = str(Path(__file__).with_name("web"))   # served at /robot-web (server.py)
 
 
 def collapse_panels(js: str) -> str | None:
@@ -99,7 +103,7 @@ class RobotFrontend:
                 if collapsed is None and not self._warned:
                     self._warned = True
                     logger.warning("robot fork: the frontend bundle changed, its panels start open (robot/frontend.py)")
-                body = ((collapsed or js) + "\n" + FACE_CENTER).encode()
+                body = ((collapsed or js) + "\n" + FACE_CENTER + "\n" + INOCHI2D).encode()
             cached = (key, body, hashlib.sha1(body).hexdigest() if body else "")
             self._bundles[path] = cached
         return (cached[1], cached[2]) if cached[1] else None

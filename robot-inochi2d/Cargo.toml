@@ -1,0 +1,27 @@
+# [robot fork] Inochi2D puppets on the VTuber page: inox2d (the official Rust implementation of
+# Inochi2D) and its OpenGL renderer on WebGL2, as WebAssembly. Built by ./build.sh into
+# src/open_llm_vtuber/robot/web/inochi2d/ (used by src/open_llm_vtuber/robot/inochi2d.js).
+[package]
+name = "robot-inochi2d"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# inox2d is not released with this API on crates.io: pinned to the commit this was written for
+inox2d = { git = "https://github.com/Inochi2D/inox2d", rev = "d4dd9dd7f16b775042cbda44370570abf9a8cf81" }
+inox2d-opengl = { git = "https://github.com/Inochi2D/inox2d", rev = "d4dd9dd7f16b775042cbda44370570abf9a8cf81" }
+console_error_panic_hook = "0.1.7"
+glam = "0.29.0"      # the same as inox2d's (its Vec2 is in the param API)
+glow = "0.14.1"      # the same as inox2d-opengl's
+js-sys = "0.3.64"
+json = "0.12.4"      # the puppet's parameter list (names, defaults), read from its file header
+wasm-bindgen = "0.2.87"
+web-sys = { version = "0.3.61", features = ["HtmlCanvasElement", "WebGl2RenderingContext"] }
+
+[profile.release]
+opt-level = "s"
+lto = true

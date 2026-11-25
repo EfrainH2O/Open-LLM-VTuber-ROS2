@@ -18,6 +18,11 @@ conf.yaml
 # ignore avatars
 avatars/*
 
+# [robot fork] each robot's avatar model, picked on its tablet (robot/avatar.py)
+robot_state/
+# [robot fork] Inochi2D renderer build (robot-inochi2d/build.sh; its output in src/ is kept)
+robot-inochi2d/target/
+
 # macOS system files
 .DS_Store
 
